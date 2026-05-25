@@ -22,12 +22,62 @@ final class ContextResolver {
         GenericCWDAdapter(), // catch-all fallback
     ]
 
+    /// The last activated app whose bundle id wasn't ours.
+    ///
+    /// Why we need this: clicking Worktree's status-bar item makes
+    /// AppKit activate Worktree, so `NSWorkspace.frontmostApplication`
+    /// suddenly returns Worktree itself — useless for resolving
+    /// "which folder is the user editing." We watch activation
+    /// events and remember the most recent foreign app so popover
+    /// opens (and any subsequent refresh) still resolve against
+    /// whatever the user was actually working in.
+    private var lastForeignApp: NSRunningApplication?
+    private var foreignAppObserver: NSObjectProtocol?
+    private let selfBundleID: String? = Bundle.main.bundleIdentifier
+
+    init() {
+        // Seed with whatever's frontmost right now (in case it's
+        // already a useful app on launch).
+        if let app = NSWorkspace.shared.frontmostApplication,
+           app.bundleIdentifier != selfBundleID {
+            lastForeignApp = app
+        }
+        foreignAppObserver = NSWorkspace.shared.notificationCenter
+            .addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                guard let self,
+                      let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                        as? NSRunningApplication,
+                      app.bundleIdentifier != self.selfBundleID
+                else { return }
+                Task { @MainActor in self.lastForeignApp = app }
+            }
+    }
+
+    deinit {
+        if let o = foreignAppObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(o)
+        }
+    }
+
     /// Best-effort path for the current focused window. Returns
     /// nil only if no adapter could come up with anything — the
     /// caller should hold on to the previous result and keep the
     /// menu-bar indicator stable rather than blanking out.
     func currentPath() -> String? {
-        guard let app = NSWorkspace.shared.frontmostApplication,
+        // Prefer the last activated foreign app — that's "what the
+        // user was working in before they clicked our menu bar."
+        // Fall back to frontmostApplication if we somehow haven't
+        // seen an activation yet AND the current frontmost isn't us.
+        let candidate: NSRunningApplication? = {
+            if let last = lastForeignApp { return last }
+            let front = NSWorkspace.shared.frontmostApplication
+            return front?.bundleIdentifier == selfBundleID ? nil : front
+        }()
+        guard let app = candidate,
               let bundleID = app.bundleIdentifier else {
             return nil
         }
@@ -97,38 +147,54 @@ struct XcodeAdapter: ContextAdapter {
 
 // MARK: - VS Code family (Cursor, Windsurf, Code-OSS forks)
 
-/// Two-stage strategy:
+/// Three-stage strategy, in order of reliability:
 ///
-/// 1. Look at the main process's command line — when VS Code is
-///    launched on a folder it gets `code /path/to/folder` or
-///    `--folder-uri=file:///...`. Reliable when there's exactly
-///    one window; ambiguous with multiple windows on different
-///    folders (the main process is shared).
+/// 1. **Storage file** (primary): every VS Code-family app keeps
+///    `~/Library/Application Support/<AppDir>/User/globalStorage/storage.json`
+///    where `windowsState.lastActiveWindow.folder` is the URI of
+///    the most-recently-focused folder — exactly what we want.
+///    Updates whenever the user opens a folder or switches windows,
+///    so it tracks live state.
 ///
-/// 2. Fall back to parsing the focused window's title bar via
-///    Accessibility. Default VS Code title format ends with the
-///    folder name; users who customize it harder are on their own.
+/// 2. **Renderer cmdline**: when the user launched the editor from
+///    the terminal as `code path/`, the path shows up on a renderer
+///    process's argv as `--folder-uri=…`. Useful for the "opened
+///    from CLI, never used File → Open" case.
+///
+/// 3. **AX window title**: parse the focused window's title bar
+///    (default format ends in the folder name) and cross-reference
+///    with the multi-window list from storage.json. This
+///    disambiguates when the user has several windows open.
 struct VSCodeAdapter: ContextAdapter {
-    private static let bundleIDs: Set<String> = [
-        "com.microsoft.VSCode",
-        "com.microsoft.VSCodeInsiders",
-        "com.todesktop.230313mzl4w4u92",  // Cursor
-        "com.exafunction.windsurf",
-        "com.visualstudio.code.oss",
+    /// Bundle id → application support subdirectory. The
+    /// subdirectory holds `User/globalStorage/storage.json`.
+    /// Add new forks here as they show up — the storage layout is
+    /// inherited from upstream VS Code so the same parser works.
+    private static let bundleIDToSupportDir: [String: String] = [
+        "com.microsoft.VSCode":          "Code",
+        "com.microsoft.VSCodeInsiders":  "Code - Insiders",
+        "com.todesktop.230313mzl4w4u92": "Cursor",        // Cursor
+        "com.exafunction.windsurf":      "Windsurf",
+        "com.visualstudio.code.oss":     "Code - OSS",
     ]
 
     func matches(bundleID: String) -> Bool {
-        Self.bundleIDs.contains(bundleID)
+        Self.bundleIDToSupportDir[bundleID] != nil
     }
 
     func resolve(app: NSRunningApplication) -> String? {
-        // 1) Walk descendants — VS Code-family apps spawn one
-        // renderer per window, and the workspace path appears on
-        // the renderer's argv as `--folder-uri=…` or as a tail
-        // positional. We can't tell which renderer maps to the
-        // FOCUSED window without an extension, so this only
-        // succeeds when exactly one folder is open across all
-        // windows (the common single-window case).
+        // 1) Storage file (most reliable — covers File → Open and
+        // workspace recents, not just CLI launches).
+        if let bid = app.bundleIdentifier,
+           let supportDir = Self.bundleIDToSupportDir[bid] {
+            if let path = Self.pathFromStorage(supportDir: supportDir,
+                                               pid: app.processIdentifier) {
+                return path
+            }
+        }
+
+        // 2) Descendant cmdline walk (for CLI-launched windows
+        // whose storage.json hasn't picked up the new folder yet).
         let descendants = ProcessIntrospection.descendants(of: app.processIdentifier)
         var folderURIs: Set<String> = []
         for pid in descendants {
@@ -141,7 +207,8 @@ struct VSCodeAdapter: ContextAdapter {
             return Self.pathFromFileURI(only)
         }
 
-        // 2) Title-bar parse via Accessibility.
+        // 3) AX title fallback (cross-referenced with whatever URIs
+        // we collected).
         if let title = focusedWindowTitle(for: app.processIdentifier),
            let path = Self.pathFromTitle(title, folderURIs: folderURIs) {
             return path
@@ -150,19 +217,79 @@ struct VSCodeAdapter: ContextAdapter {
         return nil
     }
 
-    /// Match `--folder-uri=file:///...` (one of several VS Code
-    /// CLI knobs). Also matches a bare positional path appearing
-    /// after `code` — rarer but worth a try.
-    private static func extractFolderURI(from cmd: String) -> String? {
-        if let r = cmd.range(of: "--folder-uri=") {
-            let tail = cmd[r.upperBound...]
-            let uri = tail.split(separator: " ").first.map(String.init) ?? ""
-            return uri.isEmpty ? nil : uri
+    // MARK: Storage-file strategy
+
+    /// Read `~/Library/Application Support/<supportDir>/User/globalStorage/storage.json`
+    /// and return the best matching folder URI.
+    ///
+    /// Single-window case: `windowsState.lastActiveWindow.folder`.
+    /// Multi-window case: cross-reference the AX focused window
+    /// title against `windowsState.openedWindows[].folder` by
+    /// matching the last path component (= folder display name).
+    private static func pathFromStorage(supportDir: String,
+                                        pid: pid_t) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let storage = home
+            .appendingPathComponent("Library/Application Support")
+            .appendingPathComponent(supportDir)
+            .appendingPathComponent("User/globalStorage/storage.json")
+        guard let data = try? Data(contentsOf: storage),
+              let raw = try? JSONSerialization.jsonObject(with: data),
+              let dict = raw as? [String: Any],
+              let windowsState = dict["windowsState"] as? [String: Any]
+        else { return nil }
+
+        // Collect candidate URIs + their order. lastActiveWindow is
+        // the most-recently-focused one, so put it first.
+        var candidates: [String] = []
+        if let last = windowsState["lastActiveWindow"] as? [String: Any],
+           let f = last["folder"] as? String { candidates.append(f) }
+        if let opened = windowsState["openedWindows"] as? [[String: Any]] {
+            for w in opened {
+                if let f = w["folder"] as? String, !candidates.contains(f) {
+                    candidates.append(f)
+                }
+            }
         }
-        if let r = cmd.range(of: "--file-uri=") {
-            let tail = cmd[r.upperBound...]
-            let uri = tail.split(separator: " ").first.map(String.init) ?? ""
-            return uri.isEmpty ? nil : uri
+        guard !candidates.isEmpty else { return nil }
+
+        // If only one folder is tracked, we're done.
+        if candidates.count == 1, let only = candidates.first {
+            return pathFromFileURI(only)
+        }
+
+        // Multi-window: use the focused-window title to pick the
+        // right one. VS Code's default title ends with the folder
+        // name (separator is em-dash).
+        if let title = focusedWindowTitle(for: pid) {
+            let lastSegment = titleTrailingSegment(title)
+            for uri in candidates {
+                guard let p = pathFromFileURI(uri) else { continue }
+                if URL(fileURLWithPath: p).lastPathComponent
+                    .caseInsensitiveCompare(lastSegment) == .orderedSame {
+                    return p
+                }
+            }
+        }
+
+        // No disambiguation available — fall back to the most
+        // recently focused one. Better to point at *something*
+        // plausible than nothing.
+        return pathFromFileURI(candidates[0])
+    }
+
+    // MARK: Cmdline-walk strategy (secondary)
+
+    /// Match `--folder-uri=file:///...` (one of several VS Code
+    /// CLI knobs). Also matches `--file-uri=` for the open-file
+    /// case (we can walk up to the repo root from a file path).
+    private static func extractFolderURI(from cmd: String) -> String? {
+        for prefix in ["--folder-uri=", "--file-uri="] {
+            if let r = cmd.range(of: prefix) {
+                let tail = cmd[r.upperBound...]
+                let uri = tail.split(separator: " ").first.map(String.init) ?? ""
+                return uri.isEmpty ? nil : uri
+            }
         }
         return nil
     }
@@ -173,34 +300,37 @@ struct VSCodeAdapter: ContextAdapter {
         return raw.removingPercentEncoding
     }
 
+    // MARK: Title-parse strategy (tertiary)
+
     /// Cross-reference the focused window's title bar with the set
     /// of folder URIs we discovered on the command line. Title
     /// formats vary; default is "<file> — <folderName>" (em-dash).
     private static func pathFromTitle(_ title: String,
                                       folderURIs: Set<String>) -> String? {
-        // Split on common separators VS Code uses in window titles.
-        let separators: [Character] = ["—", "–", "-", "|"]
-        let lastSegment: String = {
-            for sep in separators {
-                if let idx = title.lastIndex(of: sep) {
-                    return String(title[title.index(after: idx)...])
-                        .trimmingCharacters(in: .whitespaces)
-                }
-            }
-            return title.trimmingCharacters(in: .whitespaces)
-        }()
+        let lastSegment = titleTrailingSegment(title)
         guard !lastSegment.isEmpty else { return nil }
-        // Match folder URIs by basename. Folders sharing a basename
-        // (e.g. two projects both named `app`) stay ambiguous —
-        // those users will need the future Worktree-companion
-        // extension for 100% accuracy.
         for uri in folderURIs {
             if let path = pathFromFileURI(uri),
-               URL(fileURLWithPath: path).lastPathComponent == lastSegment {
+               URL(fileURLWithPath: path).lastPathComponent
+                .caseInsensitiveCompare(lastSegment) == .orderedSame {
                 return path
             }
         }
         return nil
+    }
+
+    /// Split on the common separators VS Code uses in window
+    /// titles and return whatever's after the last one. For the
+    /// default title format this is the folder name.
+    private static func titleTrailingSegment(_ title: String) -> String {
+        let separators: [Character] = ["—", "–", "-", "|"]
+        for sep in separators {
+            if let idx = title.lastIndex(of: sep) {
+                return String(title[title.index(after: idx)...])
+                    .trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return title.trimmingCharacters(in: .whitespaces)
     }
 }
 
