@@ -1,0 +1,56 @@
+# xcodegen source of truth — regenerate the .xcodeproj via:
+#   brew install xcodegen   # one-time
+#   xcodegen generate
+# `Worktree.xcodeproj` is git-ignored on purpose so it never falls
+# out of sync with this file; edit project.yml, never the project.
+
+name: Worktree
+options:
+  bundleIdPrefix: com.mattssoftware
+  deploymentTarget:
+    macOS: "14.0"
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: F6ZAL7ANAD
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  Worktree:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources/Worktree
+        excludes: [Info.plist, Worktree.entitlements]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mattssoftware.worktree
+        PRODUCT_NAME: Worktree
+        INFOPLIST_FILE: Sources/Worktree/Info.plist
+        # Entitlements file must exist for notarization — without
+        # it Xcode auto-injects `get-task-allow` for Release builds
+        # and Apple's notary service rejects the upload.
+        CODE_SIGN_ENTITLEMENTS: Sources/Worktree/Worktree.entitlements
+        # Also tell Xcode to STOP injecting its "base" entitlements
+        # (the auto-injected set includes `get-task-allow`, which is
+        # the exact entitlement notarization rejects).
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        # Asset catalog wires the chibi-branch app icon Xcode bakes
+        # into Contents/Resources/AppIcon.icns at build time, same
+        # pattern Seasick uses.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application: Matt Wisniewski (F6ZAL7ANAD)"
+        OTHER_CODE_SIGN_FLAGS: "--timestamp --options=runtime"
+        ENABLE_HARDENED_RUNTIME: YES
+        # Not sandboxed: we read other processes' CWDs via
+        # proc_pidinfo, shell out to /usr/bin/git, and observe
+        # window-focus events across the system via Accessibility.
+        # None of that's allowed under the app sandbox.
+        ENABLE_APP_SANDBOX: NO

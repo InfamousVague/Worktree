@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Worktree intentionally declares zero entitlements:
+        - No sandbox (we read other processes' CWDs, shell out to git,
+          observe focus across apps — none of that is allowed under
+          the sandbox).
+        - No `get-task-allow` (must be absent for notarization).
+        - No `com.apple.security.cs.*` runtime relaxations — we
+          don't load plugins or use JIT.
+        AppleEvents → Xcode + Accessibility are TCC permissions, not
+        entitlements; macOS prompts the user at first use.
+    -->
+</dict>
+</plist>

@@ -1,0 +1,21 @@
+# Xcode project is regenerated from project.yml on every build —
+# checking it in invites drift. xcodegen owns the truth.
+*.xcodeproj/
+
+# Build artifacts
+.build/
+DerivedData/
+*.app
+*.dmg
+*.zip
+
+# macOS junk
+.DS_Store
+
+# User-specific xcode state if anyone opens the regenerated project
+xcuserdata/
+*.xcuserstate
+
+# Notarization staples / logs
+*.app.dSYM.zip
+notarization-*.log
