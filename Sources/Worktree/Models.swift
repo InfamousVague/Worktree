@@ -34,6 +34,18 @@ final class WorktreeStore {
         let isMain: Bool              // the original (non-linked) worktree
     }
 
+    /// User-saved project. Path is the unique identifier — same
+    /// repo can't be saved twice. `lastKnownBranch` is refreshed
+    /// every time we load a snapshot for that path; it lets the
+    /// SAVED list show fresh branch info without doing per-row
+    /// git invocations every time the popover opens.
+    struct SavedProject: Codable, Identifiable, Equatable {
+        var id: String { path }
+        let path: String
+        let displayName: String
+        var lastKnownBranch: String?
+    }
+
     /// The repo currently shown in the menu bar. Sticky — only
     /// updates when we resolve a NEW repo from focus change; an
     /// unresolvable focus keeps the previous snapshot.
@@ -47,12 +59,34 @@ final class WorktreeStore {
     /// flight so the UI can show a spinner.
     private(set) var busy: Bool = false
 
+    /// User-saved projects, persisted across launches via
+    /// UserDefaults. Order is "most recently saved first" — the
+    /// SAVED list in the popover renders in this order.
+    private(set) var savedProjects: [SavedProject] = []
+
+    /// When non-nil, `refreshFromFocus()` ignores the resolver and
+    /// re-loads this path instead. Set by `viewSaved(_:)`, cleared
+    /// by `returnToFocus()`. Lets the user operate on a saved
+    /// project even when the IDE focus has moved elsewhere.
+    private(set) var pinnedPath: String?
+
+    var isPinned: Bool { pinnedPath != nil }
+
+    /// True when the currently-displayed snapshot's path is in
+    /// `savedProjects`. The header's bookmark toggle reads this.
+    var currentIsSaved: Bool {
+        guard let p = current?.path else { return false }
+        return savedProjects.contains(where: { $0.path == p })
+    }
+
     @ObservationIgnored private let resolver = ContextResolver()
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
+    @ObservationIgnored private let savedProjectsKey = "worktree.savedProjects"
 
     // MARK: - Lifecycle
 
     func start() {
+        loadSavedProjects()
         refreshFromFocus()
         focusObserver = NSWorkspace.shared.notificationCenter
             .addObserver(
@@ -73,7 +107,17 @@ final class WorktreeStore {
 
     /// Re-run the resolver + git lookups. Triggered on focus
     /// change, popover open, and manual refresh.
+    ///
+    /// When `pinnedPath` is set (the user explicitly chose to view
+    /// a saved project), the resolver is skipped — we always show
+    /// the pinned project regardless of what's frontmost. That
+    /// lets the user keep operating on the saved project even
+    /// after they Cmd-Tab away from it.
     func refreshFromFocus() {
+        if let pinned = pinnedPath {
+            loadSnapshot(repoRoot: pinned)
+            return
+        }
         guard let path = resolver.currentPath(),
               let root = GitOps.repoRoot(containing: path)
         else {
@@ -135,6 +179,74 @@ final class WorktreeStore {
             worktrees: worktrees,
             localBranches: branches
         )
+        // Keep saved-project branch labels current. The popover's
+        // SAVED list renders this without doing its own git work.
+        if let idx = savedProjects.firstIndex(where: { $0.path == repoRoot }),
+           savedProjects[idx].lastKnownBranch != branch {
+            savedProjects[idx].lastKnownBranch = branch
+            persistSavedProjects()
+        }
+    }
+
+    // MARK: - Saved projects
+
+    /// Add the currently-displayed project to the saved list, or
+    /// remove it if it's already there.
+    func toggleSaveCurrent() {
+        guard let snap = current else { return }
+        if let idx = savedProjects.firstIndex(where: { $0.path == snap.path }) {
+            savedProjects.remove(at: idx)
+            // If we were pinned to this one, unpin too — keeping a
+            // pin to a project the user just unsaved feels wrong.
+            if pinnedPath == snap.path { pinnedPath = nil }
+        } else {
+            // New saves go to the top of the list (LRU-ish), so
+            // the most-frequently-toggled projects stay visible
+            // without scrolling.
+            savedProjects.insert(SavedProject(
+                path: snap.path,
+                displayName: snap.displayName,
+                lastKnownBranch: snap.branch
+            ), at: 0)
+        }
+        persistSavedProjects()
+    }
+
+    /// Pin the popover view to a saved project. Loads its
+    /// snapshot synchronously so the UI updates immediately.
+    func viewSaved(_ project: SavedProject) {
+        pinnedPath = project.path
+        loadSnapshot(repoRoot: project.path)
+    }
+
+    /// Clear the pin and resume auto-following focus.
+    func returnToFocus() {
+        pinnedPath = nil
+        refreshFromFocus()
+    }
+
+    /// Drop a project from the saved list without changing what's
+    /// currently displayed. Wired to the row's context menu.
+    func removeSaved(_ project: SavedProject) {
+        savedProjects.removeAll { $0.path == project.path }
+        if pinnedPath == project.path {
+            pinnedPath = nil
+            refreshFromFocus()
+        }
+        persistSavedProjects()
+    }
+
+    private func persistSavedProjects() {
+        guard let data = try? JSONEncoder().encode(savedProjects) else { return }
+        UserDefaults.standard.set(data, forKey: savedProjectsKey)
+    }
+
+    private func loadSavedProjects() {
+        guard let data = UserDefaults.standard.data(forKey: savedProjectsKey),
+              let projects = try? JSONDecoder().decode([SavedProject].self,
+                                                       from: data)
+        else { return }
+        savedProjects = projects
     }
 
     // MARK: - Write ops (UI-triggered)

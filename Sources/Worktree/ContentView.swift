@@ -34,8 +34,7 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 12, weight: .medium))
+            gitGlyph(size: 12)
                 .foregroundStyle(.tint)
             Text("WORKTREE")
                 .font(.system(size: 12, weight: .bold))
@@ -59,14 +58,40 @@ struct ContentView: View {
     @ViewBuilder
     private func content(_ snap: WorktreeStore.RepoSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            // "Follow focus" banner — only shown when the user is
+            // pinned to a saved project, so they know how to get
+            // back to focus-follow mode.
+            if store.isPinned {
+                followFocusBanner
+            }
+
             // Repo + branch summary
             VStack(alignment: .leading, spacing: 2) {
-                Text(snap.displayName)
-                    .font(.system(size: 15, weight: .semibold))
-                    .lineLimit(1)
                 HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 10))
+                    Text(snap.displayName)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer()
+                    // Bookmark toggle — fills when this project is
+                    // in the saved list. Tapping toggles save state.
+                    Button {
+                        store.toggleSaveCurrent()
+                    } label: {
+                        Image(systemName: store.currentIsSaved
+                              ? "bookmark.fill" : "bookmark")
+                            .font(.system(size: 12))
+                            .foregroundStyle(store.currentIsSaved
+                                             ? Color.accentColor
+                                             : .secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(store.currentIsSaved
+                          ? "Remove from saved projects"
+                          : "Save this project")
+                }
+                HStack(spacing: 6) {
+                    gitGlyph(size: 10)
+                        .foregroundStyle(.secondary)
                     Text(snap.branch)
                         .font(.system(size: 11, design: .monospaced))
                     Spacer()
@@ -101,6 +126,19 @@ struct ContentView: View {
                 }
             }
 
+            // Saved projects list — only shown when there's at
+            // least one. Tapping a row pins the popover view to
+            // that project; right-click removes it from the list.
+            if !store.savedProjects.isEmpty {
+                Divider()
+                sectionLabel("SAVED (\(store.savedProjects.count))")
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(store.savedProjects) { p in
+                        savedRow(p, currentPath: snap.path)
+                    }
+                }
+            }
+
             // Error banner
             if let err = store.lastError {
                 Text(err)
@@ -128,6 +166,20 @@ struct ContentView: View {
                 pill(text: "\(snap.dirty)*", tint: .yellow)
             }
         }
+    }
+
+    /// The official Git logo, rendered as a template image so
+    /// SwiftUI's `.foregroundStyle(...)` can tint it the same way
+    /// it tints SF Symbols. Lives in
+    /// `Assets.xcassets/MenuBarIcon.imageset` with
+    /// `template-rendering-intent` set to `template`. Sized to
+    /// match the SF Symbol it replaced (which was font-driven —
+    /// the size argument here is the rough pt-equivalent).
+    private func gitGlyph(size: CGFloat) -> some View {
+        Image("MenuBarIcon")
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
     }
 
     private func pill(text: String, tint: Color) -> some View {
@@ -170,6 +222,72 @@ struct ContentView: View {
         .help(current ? "Currently on \(name)" : "Switch to \(name)")
     }
 
+    /// Small "← Follow current focus" pill shown at the top of
+    /// content when the user has pinned to a saved project. Tap to
+    /// clear the pin and resume focus-following.
+    private var followFocusBanner: some View {
+        Button {
+            store.returnToFocus()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.uturn.left")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("Following saved project")
+                    .font(.system(size: 10, weight: .medium))
+                Spacer()
+                Text("Follow focus")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity)
+            .background(Color.accentColor.opacity(0.10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Stop pinning this project; resume tracking focused window")
+    }
+
+    private func savedRow(_ p: WorktreeStore.SavedProject,
+                          currentPath: String) -> some View {
+        let isCurrent = p.path == currentPath
+        return Button {
+            store.viewSaved(p)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isCurrent
+                      ? "bookmark.fill" : "bookmark")
+                    .font(.system(size: 10))
+                    .foregroundStyle(isCurrent
+                                     ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(p.displayName)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    if let b = p.lastKnownBranch {
+                        Text(b)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isCurrent
+              ? "Currently viewing \(p.displayName)"
+              : "Switch to \(p.displayName)")
+        .contextMenu {
+            Button("Remove from saved", role: .destructive) {
+                store.removeSaved(p)
+            }
+        }
+    }
+
     private func worktreeRow(_ w: WorktreeStore.WorktreeEntry) -> some View {
         HStack(spacing: 6) {
             Image(systemName: w.isCurrent
@@ -205,8 +323,7 @@ struct ContentView: View {
 
     private var emptyState: some View {
         VStack(spacing: 6) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 22))
+            gitGlyph(size: 22)
                 .foregroundStyle(.tertiary)
             Text("Not in a git repo")
                 .font(.system(size: 12, weight: .medium))

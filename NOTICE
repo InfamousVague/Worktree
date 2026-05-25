@@ -1,0 +1,13 @@
+Worktree
+========
+
+Worktree bundles the official Git logo as its menu-bar icon
+(`Sources/Worktree/Resources/MenuBarIcon.png`).
+
+  Git Logo by Jason Long
+  Licensed under the Creative Commons Attribution 3.0 Unported License
+  https://creativecommons.org/licenses/by/3.0/
+  Source: https://git-scm.com/downloads/logos
+
+No modifications to the logo's design were made; the source SVG was
+rasterized to a 1024×1024 PNG for use as an NSStatusItem template image.

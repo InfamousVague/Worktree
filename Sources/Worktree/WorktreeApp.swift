@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 
 /// Entry point. SwiftUI's @main is the cleanest way to bootstrap
@@ -33,11 +34,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(
             withLength: NSStatusItem.variableLength)
         statusItem.button?.imagePosition = .imageLeading
-        statusItem.button?.image = NSImage(
+        // Official Git logo (CC BY 3.0, Jason Long) bundled at
+        // Resources/MenuBarIcon.png — see NOTICE for attribution.
+        // Fall back to the SF Symbol if the asset is missing for
+        // some reason so the button never renders empty.
+        let menuBarImage = NSImage(named: "MenuBarIcon") ?? NSImage(
             systemSymbolName: "arrow.triangle.branch",
             accessibilityDescription: "Worktree"
         )
-        statusItem.button?.image?.isTemplate = true
+        // Scale the asset down to the menu-bar's expected ~18pt
+        // height. Without this, the 1024×1024 source PNG dominates
+        // the bar.
+        menuBarImage?.size = NSSize(width: 18, height: 18)
+        menuBarImage?.isTemplate = true
+        statusItem.button?.image = menuBarImage
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePopover(_:))
 
@@ -60,6 +70,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateStatusBarTitle() }
         }
+
+        // Request Accessibility on first launch. Worktree needs it
+        // to read the focused-window title in VS Code-family apps —
+        // without AX, multi-window setups can't be disambiguated
+        // (storage.json lists all open windows but doesn't say
+        // which one is currently focused). The prompt is one-time;
+        // macOS remembers the user's answer.
+        let opts: NSDictionary = [
+            kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true
+        ]
+        _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
 
         store.start()
         updateStatusBarTitle()
