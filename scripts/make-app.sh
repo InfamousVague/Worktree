@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 APP="$ROOT/Worktree.app"
-VERSION="0.1.0"
+VERSION="0.1.1"
 SIGN_IDENTITY="${SIGN_IDENTITY:-0948896DC970503ADEF5B5070E0BB3E9D9047757}"
 DMG="$ROOT/Worktree-$VERSION.dmg"
 DERIVED="$ROOT/.build/xcode"
