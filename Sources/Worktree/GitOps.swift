@@ -76,6 +76,32 @@ enum GitOps {
         }
     }
 
+    /// Remote branches, newest-committed first. Filters out the
+    /// symbolic-ref entries (`origin/HEAD`) so the UI only sees
+    /// actual remote branches a user can switch to.
+    static func remoteBranches(repo: String) -> Result<[String], GitError> {
+        run([
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/remotes/",
+        ], cwd: repo).map { out in
+            out.split(separator: "\n")
+                .map(String.init)
+                .filter { !$0.hasSuffix("/HEAD") }
+        }
+    }
+
+    /// Create + switch to a local tracking branch from a remote ref.
+    /// `remote` is the short remote-branch name like
+    /// `origin/feature/foo`. Git's `--track` form figures out the
+    /// local name (`feature/foo`) automatically.
+    static func switchTracking(remote: String, repo: String)
+        -> Result<Void, GitError>
+    {
+        run(["switch", "--track", remote], cwd: repo).map { _ in () }
+    }
+
     /// `(short_status, ahead, behind, dirty_count)` — the bits the
     /// menu bar dropdown actually needs. `git status --porcelain
     /// --branch` returns all of it in one call so we don't pay 4×

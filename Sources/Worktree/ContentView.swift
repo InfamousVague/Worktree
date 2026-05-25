@@ -105,16 +105,25 @@ struct ContentView: View {
 
             Divider()
 
-            // Branches list (scrollable when long)
-            sectionLabel("BRANCHES")
+            // Branches list (scrollable when long). Heading carries
+            // an inline fetch button — runs `git fetch --all
+            // --prune` so the REMOTES list picks up branches the
+            // user's collaborators just pushed.
+            branchesHeader
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(snap.localBranches, id: \.self) { name in
                         branchRow(name, current: name == snap.branch)
                     }
+                    if !snap.remoteBranches.isEmpty {
+                        remotesSubheader(count: snap.remoteBranches.count)
+                        ForEach(snap.remoteBranches, id: \.self) { name in
+                            remoteBranchRow(name)
+                        }
+                    }
                 }
             }
-            .frame(maxHeight: 180)
+            .frame(maxHeight: 220)
 
             Divider()
 
@@ -200,6 +209,57 @@ struct ContentView: View {
             .padding(.horizontal, 14)
     }
 
+    /// BRANCHES heading with an inline "Fetch" button on the right.
+    /// Tapping runs `git fetch --all --prune` and reloads — the
+    /// REMOTES list (rendered just below the local branches inside
+    /// the same scroll view) picks up newly-pushed refs without
+    /// the user having to hunt for the footer's fetch glyph.
+    private var branchesHeader: some View {
+        HStack(spacing: 6) {
+            Text("BRANCHES")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(1)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                store.fetch()
+            } label: {
+                HStack(spacing: 3) {
+                    if store.busy {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 10))
+                    }
+                    Text("Fetch")
+                        .font(.system(size: 9, weight: .semibold))
+                        .tracking(0.5)
+                }
+                .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(store.busy)
+            .help("git fetch --all --prune — pick up new remote branches")
+        }
+        .padding(.horizontal, 14)
+    }
+
+    /// Sub-heading inside the same scroll view, separating remote
+    /// branches from the local ones above. Kept lighter than the
+    /// section labels so it reads as a sub-group, not a peer.
+    private func remotesSubheader(count: Int) -> some View {
+        HStack(spacing: 6) {
+            Text("REMOTES (\(count))")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(1)
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 2)
+    }
+
     private func branchRow(_ name: String, current: Bool) -> some View {
         Button {
             guard !current else { return }
@@ -220,6 +280,34 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help(current ? "Currently on \(name)" : "Switch to \(name)")
+    }
+
+    /// Remote branch row. Tap to create a local tracking branch
+    /// (`git switch --track <remote>`) and check it out — the same
+    /// muscle-memory as the local branch row, just with a cloud
+    /// glyph and a fainter color to read as "not yet local."
+    private func remoteBranchRow(_ name: String) -> some View {
+        Button {
+            store.checkoutRemote(name)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "cloud")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Text(name)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Image(systemName: "arrow.down.to.line.compact")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Check out \(name) as a local tracking branch")
     }
 
     /// Small "← Follow current focus" pill shown at the top of

@@ -24,6 +24,10 @@ final class WorktreeStore {
         let dirty: Int
         let worktrees: [WorktreeEntry]
         let localBranches: [String]
+        /// Remote branches in the form `origin/feature-foo`, with
+        /// the `origin/HEAD` symbolic ref filtered out. Tapping
+        /// one creates a local tracking branch.
+        let remoteBranches: [String]
     }
 
     struct WorktreeEntry: Equatable, Identifiable {
@@ -165,8 +169,24 @@ final class WorktreeStore {
         }()
         let branches: [String] = {
             switch GitOps.localBranches(repo: repoRoot) {
-            case .success(let bs): return bs
-            case .failure: return [branch]
+            case .success(let bs) where !bs.isEmpty: return bs
+            case .success:
+                // Suspicious: for-each-ref returned no rows for a
+                // repo we just confirmed has a current branch. Log
+                // so it shows up in Console.app and fall back to
+                // the single current branch — at least the user
+                // can see *something* to switch from.
+                NSLog("Worktree: localBranches returned empty for \(repoRoot); falling back to [\(branch)]")
+                return [branch]
+            case .failure(let e):
+                NSLog("Worktree: localBranches failed for \(repoRoot): \(e.localizedDescription)")
+                return [branch]
+            }
+        }()
+        let remotes: [String] = {
+            switch GitOps.remoteBranches(repo: repoRoot) {
+            case .success(let rs): return rs
+            case .failure: return []
             }
         }()
         current = RepoSnapshot(
@@ -177,7 +197,8 @@ final class WorktreeStore {
             behind: status.behind,
             dirty: status.dirty,
             worktrees: worktrees,
-            localBranches: branches
+            localBranches: branches,
+            remoteBranches: remotes
         )
         // Keep saved-project branch labels current. The popover's
         // SAVED list renders this without doing its own git work.
@@ -259,6 +280,23 @@ final class WorktreeStore {
             return
         }
         switch GitOps.switchBranch(branch, repo: snap.path) {
+        case .success: lastError = nil; reloadCurrent()
+        case .failure(let e): lastError = e.localizedDescription
+        }
+    }
+
+    /// Check out a remote ref as a new local tracking branch. The
+    /// remote name is the short form (e.g. `origin/feature-foo`);
+    /// git's `switch --track` derives the local branch name from
+    /// the trailing path component.
+    func checkoutRemote(_ remoteRef: String) {
+        guard let snap = current else { return }
+        if snap.dirty > 0 {
+            lastError = "Worktree has \(snap.dirty) uncommitted change(s). "
+                + "Commit or stash before checking out a new branch."
+            return
+        }
+        switch GitOps.switchTracking(remote: remoteRef, repo: snap.path) {
         case .success: lastError = nil; reloadCurrent()
         case .failure(let e): lastError = e.localizedDescription
         }
