@@ -138,10 +138,13 @@ final class WorktreeStore {
             loadSnapshot(repoRoot: pinned)
             return
         }
-        guard let path = resolver.currentPath(),
+        // Strict editor-only path: skips GenericCWDAdapter so a
+        // focus change to Mail / Slack / Spotify doesn't move
+        // the indicator. Sticky snapshot from the last verified
+        // editor focus stays in place.
+        guard let path = resolver.currentEditorPath(),
               let root = GitOps.repoRoot(containing: path)
         else {
-            // No repo found — keep the previous sticky snapshot.
             return
         }
         loadSnapshot(repoRoot: root)

@@ -68,16 +68,7 @@ final class ContextResolver {
     /// caller should hold on to the previous result and keep the
     /// menu-bar indicator stable rather than blanking out.
     func currentPath() -> String? {
-        // Prefer the last activated foreign app — that's "what the
-        // user was working in before they clicked our menu bar."
-        // Fall back to frontmostApplication if we somehow haven't
-        // seen an activation yet AND the current frontmost isn't us.
-        let candidate: NSRunningApplication? = {
-            if let last = lastForeignApp { return last }
-            let front = NSWorkspace.shared.frontmostApplication
-            return front?.bundleIdentifier == selfBundleID ? nil : front
-        }()
-        guard let app = candidate,
+        guard let app = currentForeignApp(),
               let bundleID = app.bundleIdentifier else {
             return nil
         }
@@ -88,6 +79,35 @@ final class ContextResolver {
         }
         // No adapter claimed this app — last-ditch CWD read.
         return GenericCWDAdapter().resolve(app: app)
+    }
+
+    /// Stricter variant: only returns a path if the frontmost
+    /// app is verified-editor (Xcode, VS Code-family, terminal
+    /// emulators). Skips the GenericCWDAdapter fallback so
+    /// non-editor focus changes (Mail, Slack, Spotify) don't
+    /// move the Worktree indicator — the previous snapshot
+    /// stays sticky.
+    func currentEditorPath() -> String? {
+        guard let app = currentForeignApp(),
+              let bundleID = app.bundleIdentifier else {
+            return nil
+        }
+        for adapter in adapters where adapter.matches(bundleID: bundleID) {
+            if let p = adapter.resolve(app: app), !p.isEmpty {
+                return p
+            }
+        }
+        return nil   // editor adapter didn't claim → no update
+    }
+
+    /// Prefer the last activated foreign app — that's "what the
+    /// user was working in before they clicked our menu bar."
+    /// Fall back to frontmostApplication if we somehow haven't
+    /// seen an activation yet AND the current frontmost isn't us.
+    private func currentForeignApp() -> NSRunningApplication? {
+        if let last = lastForeignApp { return last }
+        let front = NSWorkspace.shared.frontmostApplication
+        return front?.bundleIdentifier == selfBundleID ? nil : front
     }
 }
 
