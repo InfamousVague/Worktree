@@ -40,6 +40,14 @@ enum HaloLiveActivityWriter {
         do {
             let data = try JSONEncoder().encode(payload)
             try data.write(to: url, options: .atomic)
+            // Push notification so Halo re-polls immediately
+            // rather than waiting up to a polling interval —
+            // makes repo / branch switches feel instant.
+            DistributedNotificationCenter.default()
+                .postNotificationName(
+                    Notification.Name("com.mattssoftware.halo.refresh"),
+                    object: nil,
+                    deliverImmediately: true)
         } catch {
             NSLog("Worktree: live-activity write failed for \(id): \(error)")
         }
@@ -48,5 +56,10 @@ enum HaloLiveActivityWriter {
     static func clear(_ id: String) {
         let url = directory.appendingPathComponent("\(id).json")
         try? FileManager.default.removeItem(at: url)
+        DistributedNotificationCenter.default()
+            .postNotificationName(
+                Notification.Name("com.mattssoftware.halo.refresh"),
+                object: nil,
+                deliverImmediately: true)
     }
 }

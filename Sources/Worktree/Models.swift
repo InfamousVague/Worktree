@@ -247,8 +247,12 @@ final class WorktreeStore {
         } else {
             label = "Worktree"
         }
+        // "worktree.git" is a special id Halo maps to the
+        // bundled Git logo (CC BY 3.0, Jason Long) — same
+        // glyph our own menu bar item uses, rather than the
+        // SF Symbol fork-y branch icon.
         let payload = HaloLiveActivityPayload(
-            compactLeadingSymbol: "arrow.triangle.branch",
+            compactLeadingSymbol: "worktree.git",
             compactTrailingText: label,
             compactTrailingSymbol: nil,
             tintHex: "#7CB377",
