@@ -17,6 +17,21 @@ struct HaloLiveActivityPayload: Codable {
     var tintHex: String
     var priority: Int
     var updatedAt: TimeInterval
+    /// Optional worktree-specific extras — populated only by
+    /// Worktree publishes, ignored by Halo for other ids.
+    var worktree: WorktreeData?
+}
+
+/// Branch-switch payload Halo reads from disk and renders in
+/// the expanded card. `branches` is the local branch list
+/// (with `currentBranch` first if duplicated, but the
+/// renderer filters it out). `isDirty` flips on the auto-
+/// stash flow when the user picks a different branch.
+struct WorktreeData: Codable {
+    var repoPath: String
+    var currentBranch: String
+    var branches: [String]
+    var isDirty: Bool
 }
 
 /// Thin wrapper around the JSON write/clear path. Mirrors

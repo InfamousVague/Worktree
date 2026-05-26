@@ -105,6 +105,20 @@ final class WorktreeStore {
         ) { [weak self] _ in
             Task { @MainActor in self?.publishLiveActivity() }
         }
+        // Halo's expanded card posts this when the user picks
+        // a branch from the dropdown. Object string is the
+        // target branch name.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name(
+                "com.mattssoftware.worktree.switchBranch"),
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let branch = note.object as? String,
+                  !branch.isEmpty else { return }
+            Task { @MainActor in
+                self?.switchBranchWithAutoStash(to: branch)
+            }
+        }
         focusObserver = NSWorkspace.shared.notificationCenter
             .addObserver(
                 forName: NSWorkspace.didActivateApplicationNotification,
@@ -243,24 +257,33 @@ final class WorktreeStore {
     /// idle pill shows the app name so the user can tell
     /// Halo is seeing Worktree.
     private func publishLiveActivity() {
-        let label: String
-        if let snap = current {
-            let dirtyMarker = snap.dirty > 0 ? "*" : ""
-            label = "\(snap.displayName)·\(snap.branch)\(dirtyMarker)"
-        } else {
-            label = "Worktree"
+        // Default-quiet: only surface in Halo when the user is
+        // actively in an editor + we know the repo. Browsing
+        // Mail / Slack / Spotify → Worktree quietly clears its
+        // slot so the island can disappear if nothing else is
+        // worth showing.
+        guard resolver.currentEditorPath() != nil,
+              let snap = current else {
+            HaloLiveActivityWriter.clear("worktree")
+            return
         }
+        let dirtyMarker = snap.dirty > 0 ? "*" : ""
+        let label = "\(snap.displayName)·\(snap.branch)\(dirtyMarker)"
+        let extras = WorktreeData(
+            repoPath: snap.path,
+            currentBranch: snap.branch,
+            branches: snap.localBranches,
+            isDirty: snap.dirty > 0)
         // "worktree.git" is a special id Halo maps to the
-        // bundled Git logo (CC BY 3.0, Jason Long) — same
-        // glyph our own menu bar item uses, rather than the
-        // SF Symbol fork-y branch icon.
+        // bundled Git logo (CC BY 3.0, Jason Long).
         let payload = HaloLiveActivityPayload(
             compactLeadingSymbol: "worktree.git",
             compactTrailingText: label,
             compactTrailingSymbol: nil,
             tintHex: "#7CB377",
             priority: 50,
-            updatedAt: Date().timeIntervalSince1970)
+            updatedAt: Date().timeIntervalSince1970,
+            worktree: extras)
         HaloLiveActivityWriter.write(payload, for: "worktree")
     }
 
@@ -369,6 +392,64 @@ final class WorktreeStore {
         case .success: lastError = nil; reloadCurrent()
         case .failure(let e): lastError = e.localizedDescription
         }
+    }
+
+    /// Branch switch from Halo's expanded card. Auto-stashes
+    /// when the working tree is dirty, switches, then pops.
+    /// If the pop conflicts we leave the stash in place and
+    /// expose the message — same gesture Worktree's popover
+    /// would have run by hand.
+    func switchBranchWithAutoStash(to branch: String) {
+        guard let snap = current else { return }
+        // No-op when the user clicked the already-current
+        // branch (defensive — Halo filters it but trust no UI).
+        if snap.branch == branch { return }
+
+        let didStash: Bool
+        if snap.dirty > 0 {
+            // Tag the stash so the user knows where it came
+            // from when they see `git stash list`.
+            let msg =
+                "halo-auto: switching from \(snap.branch) to \(branch)"
+            switch GitOps.stashPush(message: msg,
+                                    repo: snap.path) {
+            case .success:
+                didStash = true
+            case .failure(let e):
+                lastError = "stash failed: \(e.localizedDescription)"
+                return
+            }
+        } else {
+            didStash = false
+        }
+
+        switch GitOps.switchBranch(branch, repo: snap.path) {
+        case .success:
+            lastError = nil
+        case .failure(let e):
+            // Restore the user's changes before bailing —
+            // failing to switch shouldn't leave them mid-stash.
+            if didStash {
+                _ = GitOps.stashPop(repo: snap.path)
+            }
+            lastError = "switch failed: \(e.localizedDescription)"
+            return
+        }
+
+        if didStash {
+            switch GitOps.stashPop(repo: snap.path) {
+            case .success:
+                lastError = nil
+            case .failure(let e):
+                // Don't drop the stash — let the user resolve
+                // by hand from the popover or terminal.
+                lastError =
+                    "switched to \(branch) but auto-stash pop conflicted: \(e.localizedDescription)"
+            }
+        }
+
+        reloadCurrent()
+        publishLiveActivity()
     }
 
     func createWorktree(branchName: String,

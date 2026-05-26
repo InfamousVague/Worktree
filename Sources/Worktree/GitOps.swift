@@ -195,6 +195,26 @@ enum GitOps {
         run(["switch", branch], cwd: repo).map { _ in () }
     }
 
+    /// `git stash push -u -m <message>` — captures working
+    /// tree + index + untracked files into a new stash entry.
+    /// Used by the auto-stash branch switcher so an in-progress
+    /// edit doesn't block `git switch`.
+    static func stashPush(message: String, repo: String)
+        -> Result<Void, GitError>
+    {
+        run(["stash", "push", "-u", "-m", message], cwd: repo)
+            .map { _ in () }
+    }
+
+    /// `git stash pop` — apply + drop the most recent stash.
+    /// Returns failure when there's a conflict; caller should
+    /// leave the stash in place and surface to the user.
+    static func stashPop(repo: String)
+        -> Result<Void, GitError>
+    {
+        run(["stash", "pop"], cwd: repo).map { _ in () }
+    }
+
     /// Create a new branch from `from` and switch to it.
     static func createBranch(_ name: String,
                              from: String? = nil,
