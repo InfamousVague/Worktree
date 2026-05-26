@@ -73,16 +73,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Request Accessibility on first launch. Worktree needs it
-        // to read the focused-window title in VS Code-family apps —
-        // without AX, multi-window setups can't be disambiguated
-        // (storage.json lists all open windows but doesn't say
-        // which one is currently focused). The prompt is one-time;
-        // macOS remembers the user's answer.
-        let opts: NSDictionary = [
-            kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true
-        ]
-        _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+        // NB: we deliberately don't fire AXIsProcessTrustedWithOptions
+        // at launch any more. With the suite shipping ad-hoc /
+        // signed-and-re-signed builds during development, TCC sometimes
+        // treats each rebuild as a fresh identity and the prompt
+        // re-appears every launch — annoying even when the user has
+        // already granted access. Worktree's resolver chain still works
+        // without AX (terminals + Xcode AppleScript don't need it),
+        // and the VS Code-family adapter degrades gracefully when AX
+        // is denied. Users can grant via System Settings or via the
+        // "Grant Accessibility" row in the popover footer.
 
         store.start()
         updateStatusBarTitle()
