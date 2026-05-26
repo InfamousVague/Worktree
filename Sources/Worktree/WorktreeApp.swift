@@ -23,33 +23,30 @@ struct WorktreeApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = WorktreeStore()
-    private var statusItem: NSStatusItem!
+    private var statusItem: NSStatusItem?
     private var popover: NSPopover!
     private var snapshotObservation: NSKeyValueObservation?
 
+    /// When `true`, Worktree's status item is hidden because
+    /// Halo (the MattsSoftware Dynamic Island agent) is
+    /// running and showing the same info in the island. The
+    /// popover stays reachable via Halo's eventual click-to-
+    /// open wiring. Persisted in UserDefaults; default off
+    /// until we ship the click handler.
+    private var hideWhenHaloRuns: Bool {
+        UserDefaults.standard.object(forKey: "worktree.hideMenuBarWhenHaloRuns") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "worktree.hideMenuBarWhenHaloRuns")
+    }
+
+    private var haloIsRunning: Bool {
+        NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == "com.mattssoftware.halo"
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Status item: variable-length so the title can grow with
-        // the branch name. We set both an SF Symbol image and a
-        // text title; AppKit renders them side-by-side.
-        statusItem = NSStatusBar.system.statusItem(
-            withLength: NSStatusItem.variableLength)
-        statusItem.button?.imagePosition = .imageLeading
-        // Official Git logo (CC BY 3.0, Jason Long) bundled at
-        // Resources/MenuBarIcon.png — see NOTICE for attribution.
-        // Fall back to the SF Symbol if the asset is missing for
-        // some reason so the button never renders empty.
-        let menuBarImage = NSImage(named: "MenuBarIcon") ?? NSImage(
-            systemSymbolName: "arrow.triangle.branch",
-            accessibilityDescription: "Worktree"
-        )
-        // Scale the asset down to the menu-bar's expected ~18pt
-        // height. Without this, the 1024×1024 source PNG dominates
-        // the bar.
-        menuBarImage?.size = NSSize(width: 18, height: 18)
-        menuBarImage?.isTemplate = true
-        statusItem.button?.image = menuBarImage
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(togglePopover(_:))
+        installStatusItemIfNeeded()
 
         // Popover holds the SwiftUI ContentView. Transient = closes
         // when the user clicks outside, which is the menu-bar UX
@@ -66,9 +63,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // SwiftUI's @Observable doesn't bridge cleanly to KVO; the
         // status bar title just reads `store.current` directly each
         // tick. 1 Hz is plenty — `current` only changes on focus
-        // change or a manual op.
+        // change or a manual op. Same tick also rechecks Halo's
+        // running state so the status item appears/disappears
+        // when Halo launches or quits.
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateStatusBarTitle() }
+            Task { @MainActor in
+                self?.installStatusItemIfNeeded()
+                self?.updateStatusBarTitle()
+            }
         }
 
         // Request Accessibility on first launch. Worktree needs it
@@ -92,8 +94,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - UI
 
+    /// Create or tear down the menu-bar status item depending
+    /// on whether Halo is running. Halo's island shows the
+    /// same repo + branch info that lived in our menu bar, so
+    /// running both is redundant.
+    private func installStatusItemIfNeeded() {
+        let shouldShow = !(hideWhenHaloRuns && haloIsRunning)
+        if shouldShow && statusItem == nil {
+            let item = NSStatusBar.system.statusItem(
+                withLength: NSStatusItem.variableLength)
+            item.button?.imagePosition = .imageLeading
+            // Official Git logo (CC BY 3.0, Jason Long) bundled
+            // at Resources/MenuBarIcon.png — see NOTICE for
+            // attribution. Fall back to the SF Symbol if the
+            // asset is missing so the button never renders
+            // empty.
+            let menuBarImage = NSImage(named: "MenuBarIcon") ?? NSImage(
+                systemSymbolName: "arrow.triangle.branch",
+                accessibilityDescription: "Worktree"
+            )
+            menuBarImage?.size = NSSize(width: 18, height: 18)
+            menuBarImage?.isTemplate = true
+            item.button?.image = menuBarImage
+            item.button?.target = self
+            item.button?.action = #selector(togglePopover(_:))
+            statusItem = item
+        } else if !shouldShow, let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            statusItem = nil
+        }
+    }
+
     private func updateStatusBarTitle() {
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem?.button else { return }
         if let snap = store.current {
             // Truncate long branch names so the menu bar doesn't
             // get hijacked by a 60-char feature/foo-bar-baz branch.
@@ -109,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePopover(_ sender: Any?) {
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem?.button else { return }
         if popover.isShown {
             popover.performClose(sender)
             return
