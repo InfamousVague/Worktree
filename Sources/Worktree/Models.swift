@@ -86,12 +86,25 @@ final class WorktreeStore {
     @ObservationIgnored private let resolver = ContextResolver()
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
     @ObservationIgnored private let savedProjectsKey = "worktree.savedProjects"
+    /// Refresh the live-activity payload at this cadence so
+    /// Halo's 30s TTL never expires the pill. Cheap — one
+    /// JSON write per tick.
+    @ObservationIgnored private var liveActivityTimer: Timer?
 
     // MARK: - Lifecycle
 
     func start() {
         loadSavedProjects()
         refreshFromFocus()
+        // Publish an initial pill even if the resolver can't
+        // find a focused repo yet — Worktree is "presence" UI,
+        // it should be visible as soon as the app is running.
+        publishLiveActivity()
+        liveActivityTimer = Timer.scheduledTimer(
+            withTimeInterval: 5, repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in self?.publishLiveActivity() }
+        }
         focusObserver = NSWorkspace.shared.notificationCenter
             .addObserver(
                 forName: NSWorkspace.didActivateApplicationNotification,
@@ -107,6 +120,9 @@ final class WorktreeStore {
             NSWorkspace.shared.notificationCenter.removeObserver(o)
             focusObserver = nil
         }
+        liveActivityTimer?.invalidate()
+        liveActivityTimer = nil
+        clearLiveActivity()
     }
 
     /// Re-run the resolver + git lookups. Triggered on focus
@@ -216,10 +232,21 @@ final class WorktreeStore {
     /// the JSON inline rather than linking SuiteKit just for
     /// one payload type. Format mirrors `SuiteLiveActivityStore
     /// .Payload`; Halo reads it from the shared directory.
+    ///
+    /// Published even when `current` is nil (no repo focused
+    /// yet) — Worktree is "presence" UI and should be visible
+    /// in the island as soon as the agent starts, not just
+    /// once the user happens to focus a coding window. The
+    /// idle pill shows the app name so the user can tell
+    /// Halo is seeing Worktree.
     private func publishLiveActivity() {
-        guard let snap = current else { return }
-        let dirtyMarker = snap.dirty > 0 ? "*" : ""
-        let label = "\(snap.displayName)·\(snap.branch)\(dirtyMarker)"
+        let label: String
+        if let snap = current {
+            let dirtyMarker = snap.dirty > 0 ? "*" : ""
+            label = "\(snap.displayName)·\(snap.branch)\(dirtyMarker)"
+        } else {
+            label = "Worktree"
+        }
         let payload = HaloLiveActivityPayload(
             compactLeadingSymbol: "arrow.triangle.branch",
             compactTrailingText: label,
