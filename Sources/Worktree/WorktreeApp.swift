@@ -27,23 +27,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover!
     private var snapshotObservation: NSKeyValueObservation?
 
-    /// When `true`, Worktree's status item is hidden because
-    /// Halo (the MattsSoftware Dynamic Island agent) is
-    /// running and showing the same info in the island. The
-    /// popover stays reachable via Halo's eventual click-to-
-    /// open wiring. Persisted in UserDefaults; default off
-    /// until we ship the click handler.
-    private var hideWhenHaloRuns: Bool {
-        UserDefaults.standard.object(forKey: "worktree.hideMenuBarWhenHaloRuns") == nil
-            ? true
-            : UserDefaults.standard.bool(forKey: "worktree.hideMenuBarWhenHaloRuns")
-    }
-
-    private var haloIsRunning: Bool {
-        NSWorkspace.shared.runningApplications.contains {
-            $0.bundleIdentifier == "com.mattssoftware.halo"
-        }
-    }
+    // Worktree's menu-bar status item is always shown — the
+    // earlier "hide when Halo is running" behaviour gave the
+    // user no way back into the popover when Halo couldn't
+    // open it on their behalf. Halo's island can coexist with
+    // our icon; users who don't want both can quit Worktree
+    // outright from the launcher.
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItemIfNeeded()
@@ -94,13 +83,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - UI
 
-    /// Create or tear down the menu-bar status item depending
-    /// on whether Halo is running. Halo's island shows the
-    /// same repo + branch info that lived in our menu bar, so
-    /// running both is redundant.
+    /// Install Worktree's status item once at launch. Always
+    /// shown — Halo's island is a secondary surface, the menu-
+    /// bar icon is the primary way to reach the popover (and
+    /// to confirm Worktree is actually running).
     private func installStatusItemIfNeeded() {
-        let shouldShow = !(hideWhenHaloRuns && haloIsRunning)
-        if shouldShow && statusItem == nil {
+        if statusItem == nil {
             let item = NSStatusBar.system.statusItem(
                 withLength: NSStatusItem.variableLength)
             item.button?.imagePosition = .imageLeading
@@ -119,9 +107,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.button?.target = self
             item.button?.action = #selector(togglePopover(_:))
             statusItem = item
-        } else if !shouldShow, let item = statusItem {
-            NSStatusBar.system.removeStatusItem(item)
-            statusItem = nil
         }
     }
 
