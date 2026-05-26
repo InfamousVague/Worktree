@@ -91,6 +91,34 @@ final class WorktreeStore {
     /// JSON write per tick.
     @ObservationIgnored private var liveActivityTimer: Timer?
 
+    // MARK: - Focus-driven priority boost
+    //
+    // When the user newly focuses an editor (i.e. their previous
+    // frontmost app was not an editor), the worktree pill briefly
+    // takes precedence in the island so they get a flash of "yes,
+    // we know this repo / branch" before higher-priority activities
+    // (Espresso, Now Playing) reclaim the slot.
+    /// Did the most recent `refreshFromFocus` tick see an editor?
+    /// Used to detect the non-editor → editor transition that
+    /// triggers the boost.
+    @ObservationIgnored private var wasInEditor: Bool = false
+    /// Publish at boosted priority until this date. Nil means
+    /// "publish at the normal baseline."
+    @ObservationIgnored private var priorityBoostUntil: Date?
+    /// Timer that re-publishes at the normal priority once the
+    /// boost window expires. Invalidated + replaced on overlap.
+    @ObservationIgnored private var boostRevertTimer: Timer?
+    /// Baseline priority. Lower than Espresso (60) and Now
+    /// Playing (70) so those reclaim the slot when worktree
+    /// isn't actively claiming attention.
+    private let worktreeBasePriority = 50
+    /// Boosted priority during the focus-flash window. Has to
+    /// out-rank Espresso's 60 so the worktree pill momentarily
+    /// wins even with a keep-awake session running.
+    private let worktreeBoostedPriority = 80
+    /// How long the focus-flash boost lasts before reverting.
+    private let worktreeBoostDuration: TimeInterval = 2.5
+
     // MARK: - Lifecycle
 
     func start() {
@@ -136,6 +164,8 @@ final class WorktreeStore {
         }
         liveActivityTimer?.invalidate()
         liveActivityTimer = nil
+        boostRevertTimer?.invalidate()
+        boostRevertTimer = nil
         clearLiveActivity()
     }
 
@@ -156,12 +186,42 @@ final class WorktreeStore {
         // focus change to Mail / Slack / Spotify doesn't move
         // the indicator. Sticky snapshot from the last verified
         // editor focus stays in place.
-        guard let path = resolver.currentEditorPath(),
+        let editorPath = resolver.currentEditorPath()
+        let inEditor = editorPath != nil
+        // Only flash the boost when transitioning *into* an
+        // editor from outside one. Clicking around inside the
+        // same editor leaves `wasInEditor` true, so no boost.
+        let justEnteredEditor = inEditor && !wasInEditor
+        wasInEditor = inEditor
+
+        guard let path = editorPath,
               let root = GitOps.repoRoot(containing: path)
         else {
             return
         }
+        if justEnteredEditor {
+            beginFocusPriorityBoost()
+        }
         loadSnapshot(repoRoot: root)
+    }
+
+    /// Start the focus-flash window: set `priorityBoostUntil`
+    /// to "now + boost duration", republish immediately so the
+    /// elevated priority takes effect, and schedule a revert at
+    /// expiry so the next pill cycle drops back to baseline.
+    private func beginFocusPriorityBoost() {
+        priorityBoostUntil = Date().addingTimeInterval(
+            worktreeBoostDuration)
+        boostRevertTimer?.invalidate()
+        boostRevertTimer = Timer.scheduledTimer(
+            withTimeInterval: worktreeBoostDuration,
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.priorityBoostUntil = nil
+                self?.publishLiveActivity()
+            }
+        }
     }
 
     /// Reload the snapshot for an already-known repo (after a
@@ -276,12 +336,17 @@ final class WorktreeStore {
             isDirty: snap.dirty > 0)
         // "worktree.git" is a special id Halo maps to the
         // bundled Git logo (CC BY 3.0, Jason Long).
+        let boostActive = priorityBoostUntil.map { $0 > Date() }
+            ?? false
+        let priority = boostActive
+            ? worktreeBoostedPriority
+            : worktreeBasePriority
         let payload = HaloLiveActivityPayload(
             compactLeadingSymbol: "worktree.git",
             compactTrailingText: label,
             compactTrailingSymbol: nil,
             tintHex: "#7CB377",
-            priority: 50,
+            priority: priority,
             updatedAt: Date().timeIntervalSince1970,
             worktree: extras)
         HaloLiveActivityWriter.write(payload, for: "worktree")
