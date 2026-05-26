@@ -207,6 +207,33 @@ final class WorktreeStore {
             savedProjects[idx].lastKnownBranch = branch
             persistSavedProjects()
         }
+        publishLiveActivity()
+    }
+
+    /// Surface the current repo + branch in the system-wide
+    /// island (Halo). Worktree isn't a SuiteKit pane — it's a
+    /// standalone agent that ships its own .app — so we write
+    /// the JSON inline rather than linking SuiteKit just for
+    /// one payload type. Format mirrors `SuiteLiveActivityStore
+    /// .Payload`; Halo reads it from the shared directory.
+    private func publishLiveActivity() {
+        guard let snap = current else { return }
+        let dirtyMarker = snap.dirty > 0 ? "*" : ""
+        let label = "\(snap.displayName)·\(snap.branch)\(dirtyMarker)"
+        let payload = HaloLiveActivityPayload(
+            compactLeadingSymbol: "arrow.triangle.branch",
+            compactTrailingText: label,
+            compactTrailingSymbol: nil,
+            tintHex: "#7CB377",
+            priority: 50,
+            updatedAt: Date().timeIntervalSince1970)
+        HaloLiveActivityWriter.write(payload, for: "worktree")
+    }
+
+    /// Withdraw the worktree pill — called when Worktree quits
+    /// (otherwise the 30s TTL in Halo cleans up anyway).
+    func clearLiveActivity() {
+        HaloLiveActivityWriter.clear("worktree")
     }
 
     // MARK: - Saved projects
