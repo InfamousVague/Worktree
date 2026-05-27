@@ -90,6 +90,18 @@ final class WorktreeStore {
     /// Halo's 30s TTL never expires the pill. Cheap — one
     /// JSON write per tick.
     @ObservationIgnored private var liveActivityTimer: Timer?
+    /// Subscribers + poll timer for Halo's command channel.
+    /// Halo posts a distributed notification on every queue
+    /// append; the poll is a belt-and-suspenders fallback for
+    /// the rare case where the notification is missed
+    /// (subscribe race, mid-launch arrivals, etc).
+    @ObservationIgnored private var commandsObserver: NSObjectProtocol?
+    @ObservationIgnored private var commandsPollTimer: Timer?
+    /// UUIDs we've already executed — dedup guard so a stale
+    /// queue read or a Halo re-write doesn't double-fire a
+    /// command. Capped at a few hundred entries to bound memory;
+    /// older entries get pruned in `drainCommands`.
+    @ObservationIgnored private var processedCommandIDs: Set<String> = []
 
     // MARK: - Focus-driven priority boost
     //
@@ -155,6 +167,23 @@ final class WorktreeStore {
             ) { [weak self] _ in
                 Task { @MainActor in self?.refreshFromFocus() }
             }
+        // Halo command channel — distributed notification on
+        // append + 1Hz fallback poll. Drain on either signal.
+        commandsObserver = DistributedNotificationCenter.default()
+            .addObserver(
+                forName: Notification.Name(
+                    "com.mattssoftware.worktree.commands.posted"),
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.drainCommands() }
+            }
+        commandsPollTimer = Timer.scheduledTimer(
+            withTimeInterval: 1.0, repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in self?.drainCommands() }
+        }
+        // Drain any commands already queued before we registered.
+        drainCommands()
     }
 
     func stop() {
@@ -162,6 +191,12 @@ final class WorktreeStore {
             NSWorkspace.shared.notificationCenter.removeObserver(o)
             focusObserver = nil
         }
+        if let o = commandsObserver {
+            DistributedNotificationCenter.default().removeObserver(o)
+            commandsObserver = nil
+        }
+        commandsPollTimer?.invalidate()
+        commandsPollTimer = nil
         liveActivityTimer?.invalidate()
         liveActivityTimer = nil
         boostRevertTimer?.invalidate()
@@ -329,11 +364,37 @@ final class WorktreeStore {
         }
         let dirtyMarker = snap.dirty > 0 ? "*" : ""
         let label = "\(snap.displayName)·\(snap.branch)\(dirtyMarker)"
+        // Map our in-memory model into the JSON shape Halo's
+        // rich-state decoder expects. Saved projects + worktrees
+        // get flattened to Codable-only types — Halo never sees
+        // our WorktreeEntry / SavedProject directly.
+        let worktreeEntries = snap.worktrees.map {
+            WorktreeEntryData(
+                path: $0.path,
+                branch: $0.branch,
+                isCurrent: $0.isCurrent,
+                isMain: $0.isMain)
+        }
+        let savedFlat = savedProjects.map {
+            SavedProjectData(
+                path: $0.path,
+                displayName: $0.displayName,
+                lastKnownBranch: $0.lastKnownBranch)
+        }
         let extras = WorktreeData(
             repoPath: snap.path,
+            displayName: snap.displayName,
             currentBranch: snap.branch,
             branches: snap.localBranches,
-            isDirty: snap.dirty > 0)
+            remoteBranches: snap.remoteBranches,
+            isDirty: snap.dirty > 0,
+            ahead: snap.ahead,
+            behind: snap.behind,
+            dirtyCount: snap.dirty,
+            worktrees: worktreeEntries,
+            savedProjects: savedFlat,
+            isPinned: isPinned,
+            lastError: lastError)
         // "worktree.git" is a special id Halo maps to the
         // bundled Git logo (CC BY 3.0, Jason Long).
         let boostActive = priorityBoostUntil.map { $0 > Date() }
@@ -356,6 +417,89 @@ final class WorktreeStore {
     /// (otherwise the 30s TTL in Halo cleans up anyway).
     func clearLiveActivity() {
         HaloLiveActivityWriter.clear("worktree")
+    }
+
+    // MARK: - Halo command channel
+
+    /// Read the command queue, execute anything not yet seen,
+    /// and write back the empty queue. Idempotent — safe to
+    /// call from both the distributed-notification observer
+    /// and the 1Hz fallback poll.
+    private func drainCommands() {
+        let queue = HaloCommandReader.read(for: "worktree")
+        guard !queue.commands.isEmpty else { return }
+        var stillProcessed = processedCommandIDs
+        for cmd in queue.commands where !stillProcessed.contains(cmd.id) {
+            execute(cmd)
+            stillProcessed.insert(cmd.id)
+        }
+        // Cap the processed set so a long-running session doesn't
+        // grow memory unbounded — 500 ids = a couple minutes of
+        // heavy clicking, far past anything we need to remember.
+        if stillProcessed.count > 500 {
+            // Keep only the most recent 250 — the ordering doesn't
+            // matter for correctness, just for retention.
+            stillProcessed = Set(stillProcessed.prefix(250))
+        }
+        processedCommandIDs = stillProcessed
+        // Drain: write back an empty queue so Halo's next poll
+        // sees a clean slate. This is where a Halo append could
+        // race with our drain — accepted as v1 design (1Hz
+        // cadence on both sides + processed-id dedup makes
+        // duplicate execution impossible, command loss
+        // statistically rare).
+        HaloCommandReader.write(
+            WorktreeCommandQueue(commands: [],
+                                  updatedAt: Date().timeIntervalSince1970),
+            for: "worktree")
+    }
+
+    /// Dispatch a single command to the matching `WorktreeStore`
+    /// method. Unknown actions are no-ops — forward-compatibility
+    /// with newer Halo versions.
+    private func execute(_ cmd: WorktreeCommand) {
+        switch cmd.action {
+        case "switchBranch":
+            if let b = cmd.branch, !b.isEmpty {
+                switchBranchWithAutoStash(to: b)
+            }
+        case "createBranch":
+            if let b = cmd.branch, !b.isEmpty { createBranch(b) }
+        case "fetch":
+            fetch()
+        case "pull":
+            pull()
+        case "checkoutRemote":
+            if let r = cmd.ref, !r.isEmpty { checkoutRemote(r) }
+        case "toggleSaveCurrent":
+            toggleSaveCurrent()
+        case "viewSaved":
+            if let p = cmd.path,
+               let project = savedProjects.first(where: { $0.path == p }) {
+                viewSaved(project)
+            }
+        case "returnToFocus":
+            returnToFocus()
+        case "removeSaved":
+            if let p = cmd.path,
+               let project = savedProjects.first(where: { $0.path == p }) {
+                removeSaved(project)
+            }
+        case "addWorktree":
+            if let b = cmd.branch, !b.isEmpty,
+               let p = cmd.path, !p.isEmpty {
+                createWorktree(branchName: b,
+                               createNew: cmd.createNew ?? true,
+                               atPath: p)
+            }
+        case "openInFinder":
+            if let p = cmd.path, !p.isEmpty {
+                NSWorkspace.shared.open(
+                    URL(fileURLWithPath: p))
+            }
+        default:
+            NSLog("Worktree: unknown command action \(cmd.action)")
+        }
     }
 
     // MARK: - Saved projects
