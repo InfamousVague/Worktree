@@ -63,6 +63,11 @@ final class WorktreeStore {
     /// flight so the UI can show a spinner.
     private(set) var busy: Bool = false
 
+    /// Wall-clock time of the most recent `fetch()` for the
+    /// current repo. Used by `fetchIfStale()` to throttle the
+    /// auto-fetch Halo posts on every expanded-card hover.
+    private(set) var lastFetchAt: Date?
+
     /// User-saved projects, persisted across launches via
     /// UserDefaults. Order is "most recently saved first" — the
     /// SAVED list in the popover renders in this order.
@@ -317,6 +322,11 @@ final class WorktreeStore {
             case .failure: return []
             }
         }()
+        // Reset the auto-fetch throttle when the repo changes —
+        // switching projects should refetch immediately on the
+        // next hover, even if we fetched the previous repo
+        // seconds ago.
+        if current?.path != repoRoot { lastFetchAt = nil }
         current = RepoSnapshot(
             path: repoRoot,
             displayName: URL(fileURLWithPath: repoRoot).lastPathComponent,
@@ -467,6 +477,8 @@ final class WorktreeStore {
             if let b = cmd.branch, !b.isEmpty { createBranch(b) }
         case "fetch":
             fetch()
+        case "fetchIfStale":
+            fetchIfStale()
         case "pull":
             pull()
         case "checkoutRemote":
@@ -681,6 +693,7 @@ final class WorktreeStore {
     /// `busy` so the popover can show a spinner.
     func fetch() {
         guard let snap = current else { return }
+        lastFetchAt = Date()
         busy = true
         Task.detached(priority: .userInitiated) {
             let result = GitOps.fetch(repo: snap.path)
@@ -693,6 +706,26 @@ final class WorktreeStore {
             }
         }
     }
+
+    /// Cheap auto-fetch. Halo posts this from its expanded-card
+    /// `onAppear` so the user gets fresh remote-branch / ahead-
+    /// behind data as soon as they hover. Throttled — repeated
+    /// hovers within `autoFetchCooldown` no-op so a cursor
+    /// wiggling over the island doesn't pummel the network.
+    func fetchIfStale() {
+        if let last = lastFetchAt,
+           Date().timeIntervalSince(last) < autoFetchCooldown {
+            return
+        }
+        fetch()
+    }
+
+    /// Minimum gap between auto-fetches triggered by Halo's
+    /// `fetchIfStale` command. Long enough that bouncing on /
+    /// off the island doesn't refetch every wiggle; short
+    /// enough that the data stays current when the user is
+    /// actively reviewing branches.
+    private let autoFetchCooldown: TimeInterval = 30
 
     func pull() {
         guard let snap = current else { return }
